@@ -2,51 +2,42 @@
 
 MITM / transparent proxy для `wss://uniproxy.alice.yandex.net/uni.ws` на этом ПК.
 
+## Настройка с нуля
+
+Нужны уже рабочие **root + SSH** на станции. Дальше — DNS, сертификат, firewall, запуск и чеклист:
+
+→ **[`docs/setup-from-scratch.md`](docs/setup-from-scratch.md)**
+
 ## Схема
 
-1. AdGuard / OpenWrt DNS rewrite: `uniproxy.alice.yandex.net → 192.168.0.176`
-2. QuasarBridge слушает `https://192.168.0.176:443` с сертификатом, у которого этот хост в SAN
-3. Станция думает, что ходит в Яндекс; bridge проксирует в настоящий upstream
-4. Upstream резолвится через **DNS-over-HTTPS**, чтобы не зациклиться на собственном rewrite
-
-## Режимы
-
-| Mode | Поведение |
-|---|---|
-| `observe` (по умолчанию) | логирует и форвардит всё в Яндекс |
-| `hybrid` | правила `Routing` могут пометить кадр как `local` / `drop` |
-
-Полноценный protobuf-перехват голоса (как в Go `station-max/quasar-bridge-patches`) — следующий этап.
-Сейчас `local` — заготовка под SmartTube / LLM / HA.
+1. AdGuard / OpenWrt DNS rewrite: `uniproxy*.alice.yandex.net → 192.168.0.176`
+2. QuasarBridge слушает `https://192.168.0.176:443` с SAN на этот хост
+3. Станция думает, что ходит в Яндекс; bridge проксирует в настоящий upstream (DoH)
+4. В `hybrid` правила из SQLite могут локально перехватить ответ (пример: сериал → PotPlayer, TTS режется)
 
 ## Запуск
 
 ```powershell
-cd C:\Users\Admin\Documents\deepseek-harness\default-workspace\QuasarBridge
+cd C:\Users\Admin\Documents\Projects\QuasarBridge
 .\scripts\start.ps1
 ```
 
-Проверка TLS:
-
 ```powershell
+Invoke-RestMethod http://127.0.0.1:8443/healthz
 curl.exe -sk --resolve uniproxy.alice.yandex.net:443:192.168.0.176 https://uniproxy.alice.yandex.net/healthz
 ```
 
-HTTP API: `http://127.0.0.1:8443/healthz`, `/api/status`, `/swagger`
+API: `/healthz`, `/api/status`, `/api/rules`, `/api/events`, `/swagger`
 
 ## Сертификаты
 
-Файлы: `C:\Users\Admin\Pictures\certs\fullchain.pem` + `quasar-all.key`  
-SAN включает `uniproxy.alice.yandex.net` (до 2029-01-22).
-
-На Windows Schannel **нельзя** отдавать ephemeral private key в server TLS.
-Сертификат один раз импортируется в `CurrentUser\My` (thumbprint в `appsettings.json` → `TlsStoreThumbprint`).
+Каталог `certs/` (fullchain + key / pfx). Thumbprint в `appsettings.json`.
 
 ## DNS
 
-См. `scripts/adguard-dns-rewrite.md`.
+Кратко: `scripts/adguard-dns-rewrite.md`. Полный порядок — в `docs/setup-from-scratch.md`.
 
 ## Ориентиры
 
-- [qprots/station-max](https://github.com/qprots/station-max) — Go Quasar Bridge (hybrid routing, SmartTube, LLM)
-- [yniyniyni/librestation](https://github.com/yniyniyni/librestation) — полная замена Алисы (Spotify + Gemini на колонке), другой путь
+- [qprots/station-max](https://github.com/qprots/station-max)
+- [yniyniyni/librestation](https://github.com/yniyniyni/librestation)
