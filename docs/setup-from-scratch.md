@@ -197,7 +197,7 @@ pidof com.yandex.io.sdk; pidof com.yandex.tv.alice
 
 ## 8. Локальный перехват «Включи сериал»
 
-Правило в SQLite (`Data/quasar-bridge.db`), смотреть/править:
+Правило в SQLite (`App_Data/quasar-bridge.db`, создаётся при старте), смотреть/править:
 
 `GET/POST http://127.0.0.1:8443/api/rules`
 

@@ -27,7 +27,7 @@ builder.Services.AddHttpClient("doh", c =>
     c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "QuasarBridge/1.0");
 });
 
-var dbPathConfig = builder.Configuration["QuasarBridge:DatabasePath"] ?? "data/quasar-bridge.db";
+var dbPathConfig = builder.Configuration["QuasarBridge:DatabasePath"] ?? "App_Data/quasar-bridge.db";
 var dbPath = Path.IsPathRooted(dbPathConfig)
     ? dbPathConfig
     : Path.Combine(builder.Environment.ContentRootPath, dbPathConfig);
@@ -140,7 +140,7 @@ if (bool.TryParse(Environment.GetEnvironmentVariable("QUASAR_OPEN_SWAGGER"), out
 await using (var scope = app.Services.CreateAsyncScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<QuasarBridgeDbContext>();
-    await DbInitializer.InitializeAsync(db, app.Logger);
+    await DbInitializer.InitializeAsync(db, dbPath, app.Logger);
 }
 
 var router = app.Services.GetRequiredService<MessageRouter>();

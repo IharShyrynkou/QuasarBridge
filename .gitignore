@@ -17,9 +17,11 @@ out/
 logs/
 *.log
 
-## Local DB sidecars
+## SQLite (создаётся при старте через DbInitializer)
+*.db
 *.db-shm
 *.db-wal
+App_Data/
 
 ## OS
 Thumbs.db

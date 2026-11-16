@@ -11,7 +11,7 @@ public class QuasarBridgeOptions
     public string LogFilePath { get; set; } = "logs/quasar-bridge.log";
 
     /// <summary>Relative or absolute path to SQLite database file.</summary>
-    public string DatabasePath { get; set; } = "data/quasar-bridge.db";
+    public string DatabasePath { get; set; } = "App_Data/quasar-bridge.db";
 
     /// <summary>observe = log+forward; hybrid = apply DB routing rules for local handling.</summary>
     public string Mode { get; set; } = "hybrid";

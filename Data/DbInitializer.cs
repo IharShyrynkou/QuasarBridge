@@ -25,32 +25,43 @@ public static class DbInitializer
         "\"tv_show\""
     ];
 
-    public static async Task InitializeAsync(QuasarBridgeDbContext db, ILogger logger, CancellationToken ct = default)
+    public static async Task InitializeAsync(
+        QuasarBridgeDbContext db,
+        string databasePath,
+        ILogger logger,
+        CancellationToken ct = default)
     {
-        await db.Database.EnsureCreatedAsync(ct);
-
-        var markersJson = JsonSerializer.Serialize(SeriesCloudMarkers);
-        var existing = await db.RoutingRules.FirstOrDefaultAsync(r => r.Name == SampleRuleName, ct);
-        if (existing is null)
+        var createdFile = !File.Exists(databasePath);
+        if (createdFile)
         {
-            db.RoutingRules.Add(CreateSampleRule(markersJson));
-            await db.SaveChangesAsync(ct);
-            logger.LogInformation("Seeded sample routing rule {name}", SampleRuleName);
+            var dir = Path.GetDirectoryName(databasePath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            logger.LogInformation("SQLite database missing — creating {path}", databasePath);
+        }
+
+        var createdSchema = await db.Database.EnsureCreatedAsync(ct);
+        if (createdSchema)
+            logger.LogInformation("SQLite schema created at {path}", databasePath);
+        else if (!createdFile)
+            logger.LogInformation("SQLite database ready at {path}", databasePath);
+
+        var existing = await db.RoutingRules.AsNoTracking()
+            .FirstOrDefaultAsync(r => r.Name == SampleRuleName, ct);
+        if (existing is not null)
+        {
+            logger.LogInformation(
+                "Routing rules already initialized (sample {name} id={id})",
+                SampleRuleName, existing.Id);
             return;
         }
 
-        // Keep sample rule pointed at cloud-side series markers (voice ASR is remote).
-        existing.Route = "local";
-        existing.Enabled = true;
-        existing.Priority = 10;
-        existing.ContainsAnyJson = markersJson;
-        existing.ContainsNoneJson = "[]";
-        existing.Action = "open_app";
-        existing.ActionPayload = PotPlayerPath;
-        existing.Description = "Просьба включить сериал → PotPlayer (по ответу Алисы в облаке)";
-        existing.UpdatedAt = DateTimeOffset.UtcNow;
+        var markersJson = JsonSerializer.Serialize(SeriesCloudMarkers);
+        db.RoutingRules.Add(CreateSampleRule(markersJson));
         await db.SaveChangesAsync(ct);
-        logger.LogInformation("Refreshed sample routing rule {name}", SampleRuleName);
+        logger.LogInformation(
+            "Seeded sample routing rule {name} (markers={count})",
+            SampleRuleName, SeriesCloudMarkers.Length);
     }
 
     private static RoutingRule CreateSampleRule(string markersJson) => new()
