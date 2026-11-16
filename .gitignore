@@ -1,0 +1,32 @@
+## Build
+bin/
+obj/
+out/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## IDE
+.vs/
+.idea/
+*.swp
+*~
+
+## Logs & runtime
+logs/
+*.log
+
+## Local DB sidecars
+*.db-shm
+*.db-wal
+
+## Secrets / local TLS material
+certs/
+*.pfx
+*.key
+*.pem
+
+## OS
+Thumbs.db
+Desktop.ini
