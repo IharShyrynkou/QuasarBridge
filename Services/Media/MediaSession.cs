@@ -56,6 +56,7 @@ public sealed class MediaSession
         _cloud = cloud;
         _decoder = decoder;
         _logger = logger;
+        _tokens.Clear();
     }
 
     public static bool IsReply(ReadOnlySpan<byte> data) => AsrText.IsCloudReply(data);
@@ -124,138 +125,133 @@ public sealed class MediaSession
         }
     }
 
-    /// <summary>
-    /// Handle the recognized phrase only after <see cref="SpeechPause.Duration"/> of quiet speech.
-    /// «включи сериал» without a title then plays the last one.
-    /// </summary>
-    public async Task<bool> TryActOnStableAsrAsync(CancellationToken ct)
+    /// <summary>Шаг 1: фраза из накопленных ASR-токенов.</summary>
+    public MediaPhrase? CapturePhrase(PhraseCaptureOptions options)
     {
-        string hypothesis;
-        PendingAsk? pending;
-        int generation;
-        string? announce;
-        bool act;
-        bool model;
-        List<string> snapshot;
-        Task<MediaTurn>? apply;
         lock (_gate)
         {
-            if (_settled is not null || _tokens.Count == 0 || !UserSilent(SpeechPause.Duration))
-                return false;
+            if (_settled is not null || _tokens.Count == 0)
+                return null;
+            if (options.RequireUserSilent && !UserSilent(SpeechPause.Duration))
+                return null;
 
-            generation = _generation;
-            snapshot = _tokens.ToList();
-            apply = _applyGeneration == generation ? _apply : null;
-            model = apply is not null || AsrText.NeedsModel(snapshot);
-            announce = ClaimPhrase(generation, AsrText.Show(snapshot));
-            hypothesis = Hypothesis(snapshot);
             if (_pending is { } wait && DateTimeOffset.UtcNow - wait.Since > AskFor)
                 _pending = null;
-            if (model)
-            {
-                pending = null;
-                act = false;
-            }
-            else
-            {
-                var preview = MediaIntents.Parse(hypothesis);
-                if (preview is null && _pending is not null && MediaIntents.ParseAnswer(hypothesis).Kind is AnswerKind.Title or AnswerKind.Last)
-                    preview = new MediaIntent(MediaAct.PlayTitle, _pending.Kind, hypothesis);
-                if (preview is null)
-                {
-                    pending = null;
-                    act = false;
-                }
-                else
-                {
-                    pending = _pending;
-                    act = true;
-                }
-            }
-        }
 
-        if (announce is not null)
-            LogPhrase(announce);
-
-        if (model)
-        {
-            try
+            var snapshot = _tokens.ToList();
+            if(snapshot.First() != null && snapshot.First() == "сериал")
             {
-                if (apply is not null)
-                    return (await apply).Kind == MediaTurnKind.Silence;
-                var decoded = await EnsureDecode(generation, snapshot, ct);
-                var turn = await TurnAsync(generation, decoded, snapshot, ct);
-                return turn.Kind == MediaTurnKind.Silence;
+                _tokens.Remove(snapshot.First());
+                snapshot.Remove(snapshot.First());
             }
-            finally
+
+
+            var generation = _generation;
+            var needsModel = (_applyGeneration == generation && _apply is not null) || AsrText.NeedsModel(snapshot);
+
+            if (options.LogWhenNew)
             {
-                ReleasePin(generation);
+                var announce = ClaimPhrase(generation, AsrText.Show(snapshot));
+                if (announce is not null)
+                    LogPhrase(announce);
             }
-        }
 
-        if (!act)
-            return false;
+            PendingAskSnapshot? pendingSnap = _pending is null
+                ? null
+                : new PendingAskSnapshot(_pending.Kind, _pending.Since);
 
-        var outcome = await ResolveAsync(hypothesis, pending, reply: [], ct);
-        lock (_gate)
-        {
-            if (generation != _generation || _settled is not null)
-                return false;
-            if (!outcome.Settle || outcome.Turn.Kind == MediaTurnKind.Ignore)
-                return false;
-            if (outcome.ReplacePending)
-                _pending = outcome.Pending;
-            _tokens.Clear();
-            _settled = outcome.Turn;
-            _logger.LogInformation("команда: {note}", outcome.Turn.Note);
-            return outcome.Turn.Kind == MediaTurnKind.Silence;
+            return new MediaPhrase(
+                generation,
+                snapshot,
+                Hypothesis(snapshot),
+                AsrText.Show(snapshot),
+                needsModel,
+                pendingSnap);
         }
     }
 
-    public async Task<MediaTurn> DecideAsync(byte[] reply, CancellationToken ct)
+    /// <summary>Шаг 2: распознать команду и выполнить (Jellyfin / PotPlayer).</summary>
+    public async Task<MediaTurn> DecodeAsync(MediaPhrase phrase, CancellationToken ct)
     {
-        string hypothesis;
-        PendingAsk? pending;
-        int generation;
-        string? announce;
-        bool model;
-        List<string> snapshot;
-        Task<MediaTurn>? apply;
         lock (_gate)
         {
             if (_settled is not null)
                 return _settled;
-            generation = _generation;
-            snapshot = _tokens.ToList();
-            apply = _applyGeneration == generation ? _apply : null;
-            model = apply is not null || (snapshot.Count > 0 && UserSilent(SpeechPause.Duration) && AsrText.NeedsModel(snapshot));
-            hypothesis = Hypothesis(snapshot);
-            if (_pending is { } wait && DateTimeOffset.UtcNow - wait.Since > AskFor)
-                _pending = null;
-            pending = _pending;
-            announce = UserSilent(SpeechPause.Duration) ? ClaimPhrase(generation, AsrText.Show(snapshot)) : null;
+            if (phrase.Generation != _generation)
+                return new MediaTurn(MediaTurnKind.Ignore, "new utterance");
         }
 
-        if (announce is not null)
-            LogPhrase(announce);
+        var pending = ToPending(phrase.Pending);
+        var snapshot = phrase.Tokens.ToList();
 
-        if (model)
+        if (phrase.NeedsModel)
         {
             try
             {
+                Task<MediaTurn>? apply;
+                lock (_gate)
+                    apply = _applyGeneration == phrase.Generation ? _apply : null;
+
                 if (apply is not null)
                     return await apply;
-                var decoded = await EnsureDecode(generation, snapshot, ct);
-                return await TurnAsync(generation, decoded, snapshot, ct);
+                var decoded = await EnsureDecode(phrase.Generation, snapshot, ct);
+                return await TurnAsync(phrase.Generation, decoded, snapshot, ct);
             }
             finally
             {
-                ReleasePin(generation);
+                ReleasePin(phrase.Generation);
             }
         }
 
-        var outcome = await ResolveAsync(hypothesis, pending, reply, ct);
+        var outcome = await ResolveAsync(phrase.Hypothesis, pending, [], ct);
+        return CommitOutcome(phrase.Generation, outcome);
+    }
 
+    /// <summary>
+    /// Ранний запуск без ответа облака: после паузы в речи.
+    /// </summary>
+    public async Task<bool> TryActOnStableAsrAsync(CancellationToken ct)
+    {
+        var phrase = CapturePhrase(new PhraseCaptureOptions(RequireUserSilent: true, LogWhenNew: true));
+        if (phrase is null)
+            return false;
+
+        if (!phrase.NeedsModel)
+        {
+            var preview = MediaIntents.Parse(phrase.Hypothesis);
+            if (preview is null && phrase.Pending is not null
+                && MediaIntents.ParseAnswer(phrase.Hypothesis).Kind is AnswerKind.Title or AnswerKind.Last)
+                preview = new MediaIntent(MediaAct.PlayTitle, phrase.Pending.Kind, phrase.Hypothesis);
+            if (preview is null)
+                return false;
+        }
+
+        var turn = await DecodeAsync(phrase, ct);
+        return turn.Kind == MediaTurnKind.Silence;
+    }
+
+  /// <summary>Ответ облака: шаг 1 + 2.</summary>
+    public async Task<MediaTurn> DecideAsync(byte[] reply, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            if (_settled is not null)
+                return _settled;
+        }
+
+        var requireSilent = UserSilent(SpeechPause.Duration);
+        var phrase = CapturePhrase(new PhraseCaptureOptions(requireSilent, LogWhenNew: requireSilent));
+        if (phrase is null)
+            return new MediaTurn(MediaTurnKind.Ignore, "no phrase");
+
+        return await DecodeAsync(phrase, ct);
+    }
+
+    private static PendingAsk? ToPending(PendingAskSnapshot? snap) =>
+        snap is null ? null : new PendingAsk(snap.Kind, snap.Since);
+
+    private MediaTurn CommitOutcome(int generation, Outcome outcome)
+    {
         lock (_gate)
         {
             if (generation != _generation)
@@ -269,6 +265,7 @@ public sealed class MediaSession
                 _tokens.Clear();
                 _settled = outcome.Turn;
             }
+
             if (outcome.Turn.Kind != MediaTurnKind.Ignore && outcome.Settle)
                 _logger.LogInformation("команда: {note}", outcome.Turn.Note);
             return outcome.Turn;

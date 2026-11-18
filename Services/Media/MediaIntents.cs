@@ -89,18 +89,43 @@ public static class MediaIntents
     {
         if (string.IsNullOrWhiteSpace(phrase))
             return "";
-        var words = Words(phrase);
-        if (words.Length == 0)
+        var rawWords = Words(phrase);
+        if (rawWords.Length == 0)
             return "";
-        words = words.Where(w => !IsSynopsisWord(w) && !IsUiChatter(w)).ToArray();
+        var hadGarbage = rawWords.Any(w => IsSynopsisWord(w) || IsUiChatter(w));
+        var words = rawWords.Where(w => !IsSynopsisWord(w) && !IsUiChatter(w) && !IsNoise(w)).ToArray();
         if (words.Length == 0)
             return "";
         words = DropEchoes(words.Where(w => !IsKind(w)).ToArray());
-        if (words.Length <= 6 && string.Join(' ', words).Length <= 52)
+        if (!hadGarbage && words.Length <= 6 && string.Join(' ', words).Length <= 52)
             return string.Join(' ', words);
-        var tail = words.TakeLast(Math.Min(5, words.Length)).Where(w => !IsNoise(w)).ToArray();
-        tail = DropEchoes(tail);
-        return tail.Length >= 1 ? string.Join(' ', tail) : string.Join(' ', words.TakeLast(3));
+        return TailTitleWords(words);
+    }
+
+    private static string TailTitleWords(string[] words)
+    {
+        var candidates = new List<string>();
+        for (var i = words.Length - 1; i >= 0 && candidates.Count < 5; i--)
+        {
+            var w = words[i];
+            if (IsSynopsisWord(w) || IsUiChatter(w))
+            {
+                if (candidates.Count >= 2)
+                    break;
+                continue;
+            }
+
+            if (IsNoise(w) || w is "все" or "всех" || w.Length < 2)
+                continue;
+            candidates.Insert(0, w);
+        }
+
+        candidates = DropEchoes(candidates.ToArray()).ToList();
+        if (candidates.Count >= 2)
+            return string.Join(' ', candidates);
+        if (candidates.Count == 1)
+            return candidates[0];
+        return string.Join(' ', words.TakeLast(3).Where(w => !IsNoise(w) && w.Length >= 2));
     }
 
     public static MediaAnswer ParseAnswer(string? phrase)
@@ -296,7 +321,7 @@ public static class MediaIntents
         word is "пожалуйста" or "алиса" or "алису" or "мне" or "нам" or "хочу" or "можно" or "ну" or "же"
             or "мой" or "моя" or "мою" or "мое" or "моего" or "этот" or "эту" or "это" or "на" or "с" or "от"
             or "из" or "про" or "там" or "тут" or "сейчас" or "просто" or "давай" or "какой" or "какая"
-            or "какое" or "какие" or "вам" or "тебе" or "где" or "удобнее" or "все" or "всех";
+            or "какое" or "какие" or "вам" or "тебе" or "где" or "удобнее" or "в" or "и" or "о" or "по";
 
     private static bool IsSynopsisWord(string word) =>
         word.StartsWith("рассказыва", StringComparison.Ordinal)
@@ -314,7 +339,9 @@ public static class MediaIntents
         || word.StartsWith("впечатля", StringComparison.Ordinal)
         || word.StartsWith("спецэфф", StringComparison.Ordinal)
         || word.StartsWith("мультфил", StringComparison.Ordinal)
-        || word is "демоны" or "демон" or "пр" or "и" or "дина" or "как" or "такими" or "основ" or "многие" or "которых";
+        || word.StartsWith("сража", StringComparison.Ordinal)
+        || word.StartsWith("черном", StringComparison.Ordinal)
+        || word is "демоны" or "демон" or "пр" or "дина" or "как" or "такими" or "основ" or "многие" or "которых" or "г";
 
     private static bool IsUiChatter(string word) =>
         word.StartsWith("результат", StringComparison.Ordinal)

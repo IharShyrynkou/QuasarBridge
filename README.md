@@ -29,6 +29,8 @@ curl.exe -sk --resolve uniproxy.alice.yandex.net:443:192.168.0.176 https://unipr
 
 API: `/healthz`, `/api/status`, `/api/rules`, `/api/events`, `/swagger`
 
+Медиа-команды (фраза → decode → ответ станции): [`docs/media-pipeline.md`](docs/media-pipeline.md)
+
 ## Сертификаты
 
 Каталог `certs/` (fullchain + key / pfx). Thumbprint в `appsettings.json`.

@@ -305,20 +305,20 @@ public class UniProxyService
                 if (toStation && MediaSession.IsReply(data))
                 {
                     var turn = await media.DecideAsync(data, cts.Token);
-                    if (turn.Kind == MediaTurnKind.Silence)
+                    var plan = MediaStationDelivery.Plan(turn, data);
+                    if (plan.Mode == StationReplyMode.SilenceReadableText)
                     {
-                        data = PayloadSilencer.BlankReadableSpeech(data);
-                        mute.Mute(TimeSpan.FromSeconds(12));
-                        _logger.LogDebug("[{id}] media silence: {note}", id, turn.Note);
-                        await SendAsync(id, dir, dst, data, msgType, cts.Token);
+                        mute.Mute(plan.MuteFor);
+                        _logger.LogDebug("[{id}] media silence: {note}", id, plan.Note);
+                        await SendAsync(id, dir, dst, plan.Payload, msgType, cts.Token);
                         continue;
                     }
 
-                    if (turn.Kind == MediaTurnKind.Passthrough)
+                    if (plan.Mode == StationReplyMode.Passthrough)
                     {
                         mute.Unmute();
-                        _logger.LogDebug("[{id}] media passthrough: {note}", id, turn.Note);
-                        await SendAsync(id, dir, dst, data, msgType, cts.Token);
+                        _logger.LogDebug("[{id}] media passthrough: {note}", id, plan.Note);
+                        await SendAsync(id, dir, dst, plan.Payload, msgType, cts.Token);
                         continue;
                     }
                 }
@@ -386,8 +386,9 @@ public class UniProxyService
 
         if (mediaTurn is { Kind: MediaTurnKind.Silence })
         {
-            mute.Mute(TimeSpan.FromSeconds(12));
-            _logger.LogDebug("[{id}] media flush silence: {note} frames={count}", id, mediaTurn.Note, frames.Count);
+            var plan = MediaStationDelivery.Plan(mediaTurn, []);
+            mute.Mute(plan.MuteFor);
+            _logger.LogDebug("[{id}] media flush silence: {note} frames={count}", id, plan.Note, frames.Count);
             foreach (var frame in frames)
             {
                 if (MediaFrame.IsCloudAudio(frame.Data))
@@ -396,7 +397,7 @@ public class UniProxyService
                     continue;
                 }
 
-                var silenced = PayloadSilencer.BlankReadableSpeech(frame.Data);
+                var silenced = MediaStationDelivery.ForFlush(mediaTurn, frame.Data).Payload;
                 await SendAsync(id, "upstream->station:silenced", stationWs, silenced, frame.Type, ct);
             }
 
@@ -405,8 +406,9 @@ public class UniProxyService
 
         if (mediaTurn is { Kind: MediaTurnKind.Passthrough })
         {
+            var plan = MediaStationDelivery.Plan(mediaTurn, []);
             mute.Unmute();
-            _logger.LogDebug("[{id}] media flush passthrough: {note} frames={count}", id, mediaTurn.Note, frames.Count);
+            _logger.LogDebug("[{id}] media flush passthrough: {note} frames={count}", id, plan.Note, frames.Count);
             foreach (var frame in frames)
                 await SendAsync(id, "upstream->station", stationWs, frame.Data, frame.Type, ct);
             return;
