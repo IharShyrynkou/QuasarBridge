@@ -1,0 +1,31 @@
+# SAN для MITM QuasarBridge (локальная сеть, своя CA).
+[ req ]
+default_bits       = 2048
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = req_ext
+
+[ dn ]
+CN = quasar.yandex.net
+O  = QuasarBridge Homelab
+C  = RU
+
+[ req_ext ]
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1  = quasar.yandex.net
+DNS.2  = *.quasar.yandex.net
+DNS.3  = uniproxy.alice.yandex.net
+DNS.4  = uniproxy-quic.alice.yandex.net
+DNS.5  = rpc.alice.yandex.net
+DNS.6  = alice.yandex.net
+DNS.7  = alice-ats.yandex.net
+DNS.8  = voiceservices.yandex.net
+DNS.9  = ws.api.music.yandex.net
+DNS.10 = startup.mobile.yandex.net
+DNS.11 = scbh.yandex.net
+DNS.12 = quasar.s3.yandex.net
+DNS.13 = oauth.yandex.ru
+DNS.14 = login.yandex.ru

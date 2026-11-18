@@ -9,14 +9,24 @@ using Microsoft.Extensions.Options;
 using QuasarBridge.Data;
 using QuasarBridge.Options;
 using QuasarBridge.Services;
+using QuasarBridge.Services.Media;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
 
 builder.Services.Configure<QuasarBridgeOptions>(builder.Configuration.GetSection(QuasarBridgeOptions.SectionName));
+builder.Services.Configure<JellyfinOptions>(builder.Configuration.GetSection(JellyfinOptions.SectionName));
+builder.Services.Configure<PotPlayerOptions>(builder.Configuration.GetSection(PotPlayerOptions.SectionName));
 builder.Services.AddSingleton<ProxyState>();
 builder.Services.AddSingleton<UpstreamDnsResolver>();
 builder.Services.AddSingleton<MessageRouter>();
 builder.Services.AddSingleton<LocalCommandHandler>();
+builder.Services.AddSingleton<JellyfinLibrary>();
+builder.Services.AddSingleton<PotPlayerLauncher>();
+builder.Services.Configure<FreeLlmOptions>(builder.Configuration.GetSection(FreeLlmOptions.SectionName));
+builder.Services.AddHttpClient("freellm", c => c.Timeout = TimeSpan.FromSeconds(12));
+builder.Services.AddSingleton<FreeLlmCommandDecoder>();
+builder.Services.AddSingleton<PreparedSpeech>();
 builder.Services.AddSingleton<UniProxyService>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -24,6 +34,11 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddHttpClient("doh", c =>
 {
     c.Timeout = TimeSpan.FromSeconds(5);
+    c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "QuasarBridge/1.0");
+});
+builder.Services.AddHttpClient("jellyfin", c =>
+{
+    c.Timeout = TimeSpan.FromSeconds(15);
     c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "QuasarBridge/1.0");
 });
 
@@ -38,12 +53,27 @@ builder.Services.AddDbContext<QuasarBridgeDbContext>(o =>
 
 builder.Logging.ClearProviders();
 builder.Logging.AddSimpleConsole(o => { o.SingleLine = true; o.TimestampFormat = "HH:mm:ss "; });
+// appsettings.json: тихая консоль (Microsoft.* → Warning), без глобального override
+builder.Logging.AddConfiguration(builder.Configuration.GetSection("Logging"));
+builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>("QuasarBridge", LogLevel.Information);
+builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>("Microsoft.AspNetCore", LogLevel.Warning);
+builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>("Microsoft.EntityFrameworkCore", LogLevel.Warning);
+builder.Logging.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>("System.Net.Http", LogLevel.Warning);
+
 var earlyLogPath = builder.Configuration["QuasarBridge:LogFilePath"]
                    ?? Environment.GetEnvironmentVariable("QUASAR_LOG_FILE")
                    ?? "logs/quasar-bridge.log";
 if (!Path.IsPathRooted(earlyLogPath))
     earlyLogPath = Path.Combine(builder.Environment.ContentRootPath, earlyLogPath);
-builder.Logging.AddProvider(new SimpleFileLoggerProvider(earlyLogPath));
+builder.Logging.AddProvider(new SimpleFileLoggerProvider(earlyLogPath, LogLevel.Debug));
+// В файл — подробности (HTTP-цепочка Kestrel, DoH HttpClient) начиная с Debug/Information
+builder.Logging.AddFilter<SimpleFileLoggerProvider>(null, LogLevel.Debug);
+builder.Logging.AddFilter<SimpleFileLoggerProvider>("Microsoft.AspNetCore", LogLevel.Information);
+builder.Logging.AddFilter<SimpleFileLoggerProvider>("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Information);
+builder.Logging.AddFilter<SimpleFileLoggerProvider>("Microsoft.AspNetCore.Routing", LogLevel.Information);
+builder.Logging.AddFilter<SimpleFileLoggerProvider>("Microsoft.AspNetCore.Mvc", LogLevel.Information);
+builder.Logging.AddFilter<SimpleFileLoggerProvider>("System.Net.Http", LogLevel.Information);
+builder.Logging.AddFilter<SimpleFileLoggerProvider>("QuasarBridge", LogLevel.Debug);
 
 builder.WebHost.UseUrls("");
 
@@ -156,6 +186,27 @@ if (opts.SwaggerEnabled)
 
 app.MapControllers();
 
+app.MapPost("/alice/say", async (HttpContext ctx, PreparedSpeech speech, IHttpClientFactory http, ILogger<Program> log, CancellationToken ct) =>
+{
+    var ip = ctx.Connection.RemoteIpAddress;
+    if (ip is null || !IPAddress.IsLoopback(ip))
+        return Results.StatusCode(403);
+
+    var phrase = "Хозяин, всё готово.";
+    var question = "который час";
+    var client = http.CreateClient();
+    var answerWav = await SpeakAsync(client, phrase, ct);
+    var questionWav = await SpeakAsync(client, question, ct);
+    var answer = OpusSpeech.Pack(answerWav, 48000, OpusSpeech.SpeakerTag, leadMs: 60, tailMs: 200);
+    var ask = OpusSpeech.Pack(questionWav, 16000, OpusSpeech.MicTag, leadMs: 200, tailMs: 1400);
+    speech.Arm(ask, answer);
+    var started = StationAsk.Start(out var detail);
+    if (!started)
+        speech.Disarm();
+    log.LogInformation("алиса: вопрос «{question}», ответ «{phrase}», старт {ok}: {detail}", question, phrase, started, detail);
+    return Results.Ok(new { phrase, question, started, detail, answerBytes = answer.Length, questionBytes = ask.Length });
+});
+
 app.Lifetime.ApplicationStarted.Register(() =>
 {
     app.Logger.LogInformation(
@@ -175,3 +226,11 @@ app.Lifetime.ApplicationStarted.Register(() =>
 });
 
 app.Run();
+
+static async Task<byte[]> SpeakAsync(HttpClient client, string text, CancellationToken ct)
+{
+    using var body = new StringContent("{\"text\":" + System.Text.Json.JsonSerializer.Serialize(text) + "}", System.Text.Encoding.UTF8, "application/json");
+    using var response = await client.PostAsync("http://127.0.0.1:8787/v1/speak", body, ct);
+    response.EnsureSuccessStatusCode();
+    return await response.Content.ReadAsByteArrayAsync(ct);
+}

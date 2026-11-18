@@ -13,12 +13,12 @@ MITM / transparent proxy для `wss://uniproxy.alice.yandex.net/uni.ws` на э
 1. AdGuard / OpenWrt DNS rewrite: `uniproxy*.alice.yandex.net → 192.168.0.176`
 2. QuasarBridge слушает `https://192.168.0.176:443` с SAN на этот хост
 3. Станция думает, что ходит в Яндекс; bridge проксирует в настоящий upstream (DoH)
-4. В `hybrid` правила из SQLite могут локально перехватить ответ (пример: сериал → PotPlayer, TTS режется)
+4. Фразы «продолжить/включить сериал» и то же про фильм читаются из распознавания Яндекса. Мост ищет запись в Jellyfin и открывает её в PotPlayer. «Включить» без названия спрашивает, какой именно; ответ «последний» продолжает последний просмотр. «Выключи сериал/фильм» или «закрой плеер» пишет текущую секунду в Jellyfin и закрывает PotPlayer. Ключ Jellyfin лежит в `appsettings.Local.json`.
 
 ## Запуск
 
 ```powershell
-cd C:\Users\Admin\Documents\Projects\QuasarBridge
+cd C:\Cursor AI\Projects\QuasarBridge
 .\scripts\start.ps1
 ```
 
@@ -32,6 +32,10 @@ API: `/healthz`, `/api/status`, `/api/rules`, `/api/events`, `/swagger`
 ## Сертификаты
 
 Каталог `certs/` (fullchain + key / pfx). Thumbprint в `appsettings.json`.
+
+Своя CA на ~100 лет, генерация + установка на ПК и станцию:
+
+→ **[`docs/mitm-certificate-100y.md`](docs/mitm-certificate-100y.md)** · `scripts/Generate-QuasarMitmCert.ps1` · `scripts/Install-QuasarMitmCert.ps1`
 
 ## DNS
 

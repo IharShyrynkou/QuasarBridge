@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Text;
 using Microsoft.Extensions.Options;
 using QuasarBridge.Options;
+using QuasarBridge.Services.Media;
 
 namespace QuasarBridge.Services;
 
@@ -13,6 +14,10 @@ public class UniProxyService
     private readonly UpstreamDnsResolver _dns;
     private readonly MessageRouter _router;
     private readonly LocalCommandHandler _local;
+    private readonly JellyfinLibrary _jellyfin;
+    private readonly PotPlayerLauncher _player;
+    private readonly FreeLlmCommandDecoder _decoder;
+    private readonly PreparedSpeech _speech;
     private readonly ILogger<UniProxyService> _logger;
     private int _connIdSeq;
 
@@ -22,6 +27,10 @@ public class UniProxyService
         UpstreamDnsResolver dns,
         MessageRouter router,
         LocalCommandHandler local,
+        JellyfinLibrary jellyfin,
+        PotPlayerLauncher player,
+        FreeLlmCommandDecoder decoder,
+        PreparedSpeech speech,
         ILogger<UniProxyService> logger)
     {
         _state = state;
@@ -29,6 +38,10 @@ public class UniProxyService
         _dns = dns;
         _router = router;
         _local = local;
+        _jellyfin = jellyfin;
+        _player = player;
+        _decoder = decoder;
+        _speech = speech;
         _logger = logger;
     }
 
@@ -80,8 +93,9 @@ public class UniProxyService
 
             var mute = new SessionMuteGate();
             var gate = new CloudReplyGate();
-            var toUpstream = PumpAsync(id, "station->upstream", stationWs, upstreamWs, cts, intercept: true, mute, gate);
-            var toStation = PumpAsync(id, "upstream->station", upstreamWs, stationWs, cts, intercept: true, mute, gate);
+            var media = new MediaSession(_jellyfin, _player, gate, _decoder, _logger);
+            var toUpstream = PumpAsync(id, "station->upstream", stationWs, upstreamWs, cts, intercept: true, mute, gate, media);
+            var toStation = PumpAsync(id, "upstream->station", upstreamWs, stationWs, cts, intercept: true, mute, gate, media);
             var done = await Task.WhenAny(toUpstream, toStation);
             try { cts.Cancel(); } catch { }
             await Task.WhenAll(Safe(toUpstream), Safe(toStation));
@@ -154,7 +168,8 @@ public class UniProxyService
         CancellationTokenSource cts,
         bool intercept,
         SessionMuteGate mute,
-        CloudReplyGate gate)
+        CloudReplyGate gate,
+        MediaSession media)
     {
         var buf = new byte[64 * 1024];
         var toStation = string.Equals(dir, "upstream->station", StringComparison.Ordinal);
@@ -168,46 +183,103 @@ public class UniProxyService
                 {
                     var expired = gate.TakeIfExpired();
                     if (expired is { Count: > 0 })
-                        await FlushCloudReplyAsync(id, dst, expired, mute, cts.Token);
+                        await FlushCloudReplyAsync(id, dst, expired, mute, media, cts.Token);
                 }
 
                 using var ms = new MemoryStream();
                 ValueWebSocketReceiveResult result;
-                do
+                // Do not cancel ReceiveAsync — that aborts the socket and the station reports «нет интернета».
+                var receiveTask = src.ReceiveAsync(buf.AsMemory(), cts.Token).AsTask();
+                while (toStation && gate.IsBuffering && !receiveTask.IsCompleted)
+                {
+                    var wake = await Task.WhenAny(receiveTask, Task.Delay(200, cts.Token));
+                    if (await media.TryActOnStableAsrAsync(cts.Token))
+                        mute.Mute(TimeSpan.FromSeconds(8));
+                    // A finished command must release the held reply now, or the station waits 12s and says «нет интернета».
+                    var expired = gate.Take(force: media.HasSettled);
+                    if (expired is { Count: > 0 })
+                        await FlushCloudReplyAsync(id, dst, expired, mute, media, cts.Token);
+                    if (wake == receiveTask || !gate.IsBuffering)
+                        break;
+                }
+
+                result = await receiveTask;
+
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    try
+                    {
+                        if (dst.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                            await dst.CloseAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
+                    }
+                    catch { }
+                    try { cts.Cancel(); } catch { }
+                    _logger.LogInformation("[{id}] {dir} close", id, dir);
+                    return;
+                }
+
+                if (result.Count > 0) ms.Write(buf, 0, result.Count);
+                while (!result.EndOfMessage)
                 {
                     result = await src.ReceiveAsync(buf.AsMemory(), cts.Token);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        try
-                        {
-                            if (dst.State is WebSocketState.Open or WebSocketState.CloseReceived)
-                                await dst.CloseAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
-                        }
-                        catch { }
                         try { cts.Cancel(); } catch { }
-                        _logger.LogInformation("[{id}] {dir} close", id, dir);
                         return;
                     }
+
                     if (result.Count > 0) ms.Write(buf, 0, result.Count);
-                } while (!result.EndOfMessage);
+                }
 
                 var data = ms.ToArray();
                 var msgType = result.MessageType;
 
+                if (toUpstream && _speech.ClaimMic(data, out var questionAudio))
+                {
+                    if (questionAudio is not null)
+                    {
+                        var asked = media.OnUserAudio();
+                        if (asked)
+                        {
+                            mute.Unmute();
+                            _logger.LogInformation("[{id}] речь отправлена на сервер", id);
+                        }
+                        gate.OnUserAudio();
+                        _logger.LogInformation("[{id}] вопрос алисе подменён, {len} байт", id, questionAudio.Length);
+                        await SendAsync(id, dir, dst, questionAudio, msgType, cts.Token);
+                    }
+                    continue;
+                }
+
                 // User started/continued speaking → hold the next cloud reply before any TTS plays.
                 if (toUpstream && CloudReplyGate.IsOgg(data))
                 {
-                    gate.OnUserAudio();
-                    _logger.LogInformation("[{id}] user audio → hold cloud reply", id);
+                    var fresh = media.OnUserAudio();
+                    if (fresh)
+                    {
+                        mute.Unmute();
+                        _logger.LogInformation("[{id}] речь отправлена на сервер", id);
+                    }
+                    // Trailing mic audio after a handled command must not hold Alice's reply again.
+                    if (fresh || !media.HasSettled)
+                        gate.OnUserAudio();
                 }
 
-                if (toStation && mute.IsMuted)
+                // ASR hypotheses can show up either way; collect both (skip raw Opus).
+                if (!MediaFrame.IsCloudAudio(data))
+                {
+                    media.Observe(data);
+                    if (await media.TryActOnStableAsrAsync(cts.Token))
+                        mute.Mute(TimeSpan.FromSeconds(8));
+                }
+
+                if (toStation && mute.IsMuted && !_speech.ProtectReply)
                 {
                     // Drop ALL cloud audio for this turn (Ogg may be length-prefixed).
                     if (MediaFrame.IsCloudAudio(data) || (!MediaFrame.IsAapi(data) && data.Length > 128))
                     {
                         _state.OnMessage(dir + ":mute-audio", data.Length);
-                        _logger.LogInformation("[{id}] dropped cloud audio/non-aapi {len}B during mute", id, data.Length);
+                        _logger.LogDebug("[{id}] dropped cloud audio/non-aapi {len}B during mute", id, data.Length);
                         continue;
                     }
 
@@ -218,11 +290,35 @@ public class UniProxyService
 
                 if (toStation && gate.IsBuffering)
                 {
-                    var forceFlush = !CloudReplyGate.IsOgg(data) && LooksLikeAliceSpeechFrame(data);
+                    // Release only after the speech pause, so the phrase is complete.
+                    var forceFlush = !CloudReplyGate.IsOgg(data)
+                        && LooksLikeAliceSpeechFrame(data)
+                        && media.ShouldReleaseReply();
                     if (gate.TryHold(data, msgType, forceFlush, out var flush))
                     {
                         if (flush is { Count: > 0 })
-                            await FlushCloudReplyAsync(id, dst, flush, mute, cts.Token);
+                            await FlushCloudReplyAsync(id, dst, flush, mute, media, cts.Token);
+                        continue;
+                    }
+                }
+
+                if (toStation && MediaSession.IsReply(data))
+                {
+                    var turn = await media.DecideAsync(data, cts.Token);
+                    if (turn.Kind == MediaTurnKind.Silence)
+                    {
+                        data = PayloadSilencer.BlankReadableSpeech(data);
+                        mute.Mute(TimeSpan.FromSeconds(12));
+                        _logger.LogDebug("[{id}] media silence: {note}", id, turn.Note);
+                        await SendAsync(id, dir, dst, data, msgType, cts.Token);
+                        continue;
+                    }
+
+                    if (turn.Kind == MediaTurnKind.Passthrough)
+                    {
+                        mute.Unmute();
+                        _logger.LogDebug("[{id}] media passthrough: {note}", id, turn.Note);
+                        await SendAsync(id, dir, dst, data, msgType, cts.Token);
                         continue;
                     }
                 }
@@ -274,8 +370,48 @@ public class UniProxyService
         WebSocket stationWs,
         List<BufferedFrame> frames,
         SessionMuteGate mute,
+        MediaSession media,
         CancellationToken ct)
     {
+        _logger.LogInformation("[{id}] ответ сервера, кадров {count}", id, frames.Count);
+
+        MediaTurn? mediaTurn = null;
+        foreach (var frame in frames)
+        {
+            if (!MediaSession.IsReply(frame.Data))
+                continue;
+            mediaTurn = await media.DecideAsync(frame.Data, ct);
+            break;
+        }
+
+        if (mediaTurn is { Kind: MediaTurnKind.Silence })
+        {
+            mute.Mute(TimeSpan.FromSeconds(12));
+            _logger.LogDebug("[{id}] media flush silence: {note} frames={count}", id, mediaTurn.Note, frames.Count);
+            foreach (var frame in frames)
+            {
+                if (MediaFrame.IsCloudAudio(frame.Data))
+                {
+                    _state.OnMessage("upstream->station:drop-ogg", frame.Data.Length);
+                    continue;
+                }
+
+                var silenced = PayloadSilencer.BlankReadableSpeech(frame.Data);
+                await SendAsync(id, "upstream->station:silenced", stationWs, silenced, frame.Type, ct);
+            }
+
+            return;
+        }
+
+        if (mediaTurn is { Kind: MediaTurnKind.Passthrough })
+        {
+            mute.Unmute();
+            _logger.LogDebug("[{id}] media flush passthrough: {note} frames={count}", id, mediaTurn.Note, frames.Count);
+            foreach (var frame in frames)
+                await SendAsync(id, "upstream->station", stationWs, frame.Data, frame.Type, ct);
+            return;
+        }
+
         RouteDecision? localHit = null;
         foreach (var frame in frames)
         {
@@ -290,13 +426,13 @@ public class UniProxyService
 
         if (localHit is null)
         {
-            _logger.LogInformation("[{id}] cloud reply passthrough frames={count}", id, frames.Count);
+            _logger.LogDebug("[{id}] cloud reply passthrough frames={count}", id, frames.Count);
             foreach (var frame in frames)
                 await SendAsync(id, "upstream->station", stationWs, frame.Data, frame.Type, ct);
             return;
         }
 
-        _logger.LogInformation("[{id}] cloud reply LOCAL rule={rule} frames={count} → silenced AAPI, drop Ogg",
+        _logger.LogDebug("[{id}] cloud reply LOCAL rule={rule} frames={count} → silenced AAPI, drop Ogg",
             id, localHit.Rule, frames.Count);
 
         // Run side effect once (PotPlayer etc.) on the matching payload.
@@ -310,7 +446,7 @@ public class UniProxyService
             if (MediaFrame.IsCloudAudio(frame.Data))
             {
                 _state.OnMessage("upstream->station:drop-ogg", frame.Data.Length);
-                _logger.LogInformation("[{id}] flush: drop cloud audio {len}B", id, frame.Data.Length);
+                _logger.LogDebug("[{id}] flush: drop cloud audio {len}B", id, frame.Data.Length);
                 continue; // silence: never play cloud TTS for this turn
             }
 
@@ -347,6 +483,22 @@ public class UniProxyService
     private async Task SendAsync(int id, string dir, WebSocket dst, byte[] data, WebSocketMessageType type, CancellationToken ct)
     {
         if (dst.State != WebSocketState.Open) return;
+        if (dir.StartsWith("upstream->station", StringComparison.Ordinal))
+        {
+            _speech.Note(data);
+            if (_speech.ClaimSpeaker(data, out var spoken))
+            {
+                if (spoken is null)
+                {
+                    _state.OnMessage(dir + ":drop-cloud-voice", data.Length);
+                    return;
+                }
+
+                var stream = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(spoken);
+                _logger.LogInformation("[{id}] алиса говорит подготовленной речью, поток {stream}, {len} байт", id, stream, spoken.Length);
+                data = spoken;
+            }
+        }
         await dst.SendAsync(data, type, true, ct);
         _state.OnMessage(dir, data.Length);
         LogPayload(id, dir, type, data);
@@ -359,15 +511,15 @@ public class UniProxyService
             if (type == WebSocketMessageType.Text)
             {
                 var text = Encoding.UTF8.GetString(data);
-                _logger.LogInformation("[{id}] {dir} TEXT {len}B: {payload}", id, dir, data.Length, Truncate(text.Replace("\r", "\\r").Replace("\n", "\\n"), 4000));
+                _logger.LogDebug("[{id}] {dir} TEXT {len}B: {payload}", id, dir, data.Length, Truncate(text.Replace("\r", "\\r").Replace("\n", "\\n"), 4000));
             }
             else
             {
                 var asText = TryDecodeText(data);
                 if (asText != null)
-                    _logger.LogInformation("[{id}] {dir} BINARY {len}B (utf8): {payload}", id, dir, data.Length, Truncate(asText.Replace("\r", "\\r").Replace("\n", "\\n"), 4000));
+                    _logger.LogDebug("[{id}] {dir} BINARY {len}B (utf8): {payload}", id, dir, data.Length, Truncate(asText.Replace("\r", "\\r").Replace("\n", "\\n"), 4000));
                 else
-                    _logger.LogInformation("[{id}] {dir} BINARY {len}B hex[0..128]: {hex}", id, dir, data.Length, ToHexPreview(data, 128));
+                    _logger.LogDebug("[{id}] {dir} BINARY {len}B hex[0..128]: {hex}", id, dir, data.Length, ToHexPreview(data, 128));
             }
         }
         catch (Exception ex)

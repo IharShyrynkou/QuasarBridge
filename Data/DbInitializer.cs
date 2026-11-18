@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using QuasarBridge.Data.Entities;
 
@@ -46,34 +45,18 @@ public static class DbInitializer
         else if (!createdFile)
             logger.LogInformation("SQLite database ready at {path}", databasePath);
 
-        var existing = await db.RoutingRules.AsNoTracking()
-            .FirstOrDefaultAsync(r => r.Name == SampleRuleName, ct);
-        if (existing is not null)
+        var existing = await db.RoutingRules.FirstOrDefaultAsync(r => r.Name == SampleRuleName, ct);
+        if (existing is { Enabled: true })
         {
-            logger.LogInformation(
-                "Routing rules already initialized (sample {name} id={id})",
-                SampleRuleName, existing.Id);
-            return;
+            existing.Enabled = false;
+            existing.UpdatedAt = DateTimeOffset.UtcNow;
+            existing.Description = "Отключено: сериал и фильм ведёт распознанная фраза, Jellyfin и PotPlayer.";
+            await db.SaveChangesAsync(ct);
+            logger.LogInformation("Disabled legacy rule {name}: media dialogue handles series and movies", SampleRuleName);
         }
-
-        var markersJson = JsonSerializer.Serialize(SeriesCloudMarkers);
-        db.RoutingRules.Add(CreateSampleRule(markersJson));
-        await db.SaveChangesAsync(ct);
-        logger.LogInformation(
-            "Seeded sample routing rule {name} (markers={count})",
-            SampleRuleName, SeriesCloudMarkers.Length);
+        else if (existing is null)
+        {
+            logger.LogInformation("No legacy {name} rule; series and movies are handled in the proxy", SampleRuleName);
+        }
     }
-
-    private static RoutingRule CreateSampleRule(string markersJson) => new()
-    {
-        Name = SampleRuleName,
-        Route = "local",
-        Enabled = true,
-        Priority = 10,
-        ContainsAnyJson = markersJson,
-        ContainsNoneJson = "[]",
-        Action = "open_app",
-        ActionPayload = PotPlayerPath,
-        Description = "Просьба включить сериал → PotPlayer (по ответу Алисы в облаке)"
-    };
 }

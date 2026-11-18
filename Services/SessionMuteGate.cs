@@ -16,5 +16,7 @@ public sealed class SessionMuteGate
         }
     }
 
+    public void Unmute() => Interlocked.Exchange(ref _muteUntilUtcTicks, 0);
+
     public bool IsMuted => DateTimeOffset.UtcNow.UtcTicks < Interlocked.Read(ref _muteUntilUtcTicks);
 }

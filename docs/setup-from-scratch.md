@@ -34,7 +34,7 @@ ssh -i $KEY -o IdentitiesOnly=yes root@$STATION "id"
 Schannel не любит ephemeral key. Сертификат из `certs/` один раз кладём в `CurrentUser\My`.
 
 ```powershell
-cd C:\Users\Admin\Documents\Projects\QuasarBridge
+cd C:\Cursor AI\Projects\QuasarBridge
 
 # PFX уже есть в certs\, либо собрать из pem+key:
 # openssl pkcs12 -export -out certs\quasar-mitm.pfx -inkey certs\quasar-all.key -in certs\fullchain.pem
@@ -145,7 +145,7 @@ ssh -i $KEY -o IdentitiesOnly=yes root@$STATION "ping -c1 -W2 uniproxy.alice.yan
 ## 6. Запуск QuasarBridge
 
 ```powershell
-cd C:\Users\Admin\Documents\Projects\QuasarBridge
+cd C:\Cursor AI\Projects\QuasarBridge
 dotnet build -c Release
 dotnet run -c Release --no-launch-profile --project .\QuasarBridge.csproj
 # или: .\scripts\start.ps1
@@ -166,7 +166,7 @@ Invoke-RestMethod http://127.0.0.1:8443/healthz
 Invoke-RestMethod http://127.0.0.1:8443/api/rules
 ```
 
-Ожидаемо: `status=ok`, `mode=hybrid`, есть правило `open_series_potplayer`.
+Ожидаемо: `status=ok`, `mode=hybrid`. Правило `open_series_potplayer`, если оно осталось от старой версии, выключено: сериалы и фильмы обрабатывает сам мост.
 
 TLS:
 
@@ -201,9 +201,14 @@ pidof com.yandex.io.sdk; pidof com.yandex.tv.alice
 
 `GET/POST http://127.0.0.1:8443/api/rules`
 
-Смысл: голос уходит в облако **аудио**; текст фразы на мосту не виден.  
-Перехват идёт по **ответу Алисы** (уточнение сериала / «подключите к экрану» / `video_play`).  
-Дальше: открыть PotPlayer, ответ облака пропустить «пустым», **Ogg/TTS отрезать** (у Ogg часто префикс перед `OggS`).
+Голос уходит в облако аудио. Распознанная фраза приходит обратно частичными гипотезами, мост собирает её и решает сам:
+
+- «Продолжить сериал» / «Продолжить фильм» — последний просмотр из Jellyfin в PotPlayer, ответ Алисы без звука.
+- «Включить сериал» / «Включить фильм» — вопрос, какой именно. Если Алиса сама спрашивает, её реплика остаётся. Иначе вопрос говорит этот ПК.
+- Название ищется в Jellyfin и открывается с места остановки, либо с начала, если просмотра ещё не было.
+- «Последний» в ответ на вопрос — тот же последний просмотр.
+
+Ключ Jellyfin: `appsettings.Local.json` (не в git). Старое правило `open_series_potplayer` при старте выключается.
 
 После смены правил:
 
@@ -248,7 +253,9 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8443/api/rules/reload
 ### Перехват
 
 - [ ] `GET /api/rules` → правило серии enabled
-- [ ] Голос «Включи сериал» / «Включи мне сериал» → открывается PotPlayer
+- [ ] «Продолжить сериал» открывает последний сериал в PotPlayer, Алиса молчит
+- [ ] «Включи сериал» спрашивает какой; название или «последний» запускает ролик из Jellyfin
+- [ ] То же для фильма
 - [ ] Алиса **не** озвучивает «подключите к экрану» / «нет интернета»
 - [ ] В логах есть `local silenced` / `dropped cloud audio` при перехвате
 - [ ] Обычные команды Алисы (время и т.п.) по-прежнему отвечают голосом

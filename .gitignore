@@ -17,11 +17,25 @@ out/
 logs/
 *.log
 
+## Local secrets (Jellyfin key). Not committed.
+appsettings.Local.json
+
 ## SQLite (создаётся при старте через DbInitializer)
 *.db
 *.db-shm
 *.db-wal
 App_Data/
+
+## Local agent binaries and voices. Not committed.
+local-agent/runtime/
+
+## MITM private keys (генерация локально)
+certs/root-ca.key
+certs/quasar-all.key
+certs/*.pfx
+certs/mitm-cert-meta.json
+certs/*.0
+certs/root-ca.srl
 
 ## OS
 Thumbs.db
